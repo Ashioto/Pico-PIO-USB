@@ -10,6 +10,7 @@
  * Caps alone: nothing
  * Caps+Space: CapsLock
  * Caps+H/J/K/L: Left/Down/Up/Right
+ * Caps+1..9,0,-,=: F1..F12
  * GP6/GP7/GP8/GP9: Left/Down/Up/Right (always active)
  * Other keys: pass through
  * Switches + Caps layer merge into one HID report.
@@ -67,6 +68,34 @@ extern root_port_t pio_usb_root_port[PIO_USB_ROOT_PORT_CNT];
 #define KEY_ARROW_LEFT  0x50
 #define KEY_ARROW_DOWN  0x51
 #define KEY_ARROW_UP    0x52
+
+// Number row (boot HID)
+#define KEY_1           0x1E
+#define KEY_2           0x1F
+#define KEY_3           0x20
+#define KEY_4           0x21
+#define KEY_5           0x22
+#define KEY_6           0x23
+#define KEY_7           0x24
+#define KEY_8           0x25
+#define KEY_9           0x26
+#define KEY_0           0x27
+#define KEY_MINUS       0x2D
+#define KEY_EQUAL       0x2E
+
+// Function keys
+#define KEY_F1          0x3A
+#define KEY_F2          0x3B
+#define KEY_F3          0x3C
+#define KEY_F4          0x3D
+#define KEY_F5          0x3E
+#define KEY_F6          0x3F
+#define KEY_F7          0x40
+#define KEY_F8          0x41
+#define KEY_F9          0x42
+#define KEY_F10         0x43
+#define KEY_F11         0x44
+#define KEY_F12         0x45
 
 #define SW_COUNT        4
 #define SW_LEFT_PIN     6
@@ -297,6 +326,18 @@ static uint8_t remap_key(uint8_t keycode, bool caps_held) {
     case KEY_J:         return KEY_ARROW_DOWN;
     case KEY_K:         return KEY_ARROW_UP;
     case KEY_L:         return KEY_ARROW_RIGHT;
+    case KEY_1:         return KEY_F1;
+    case KEY_2:         return KEY_F2;
+    case KEY_3:         return KEY_F3;
+    case KEY_4:         return KEY_F4;
+    case KEY_5:         return KEY_F5;
+    case KEY_6:         return KEY_F6;
+    case KEY_7:         return KEY_F7;
+    case KEY_8:         return KEY_F8;
+    case KEY_9:         return KEY_F9;
+    case KEY_0:         return KEY_F10;
+    case KEY_MINUS:     return KEY_F11;
+    case KEY_EQUAL:     return KEY_F12;
     default:            return keycode;
   }
 }
