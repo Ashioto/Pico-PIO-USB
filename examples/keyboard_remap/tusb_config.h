@@ -1,6 +1,6 @@
 /*
- * TinyUSB config for keyboard_remap:
- * - Device: HID keyboard on native USB (roothub port0)
+ * TinyUSB config for keyboard_remap (debug composite):
+ * - Device: HID keyboard + CDC debug on native USB (roothub port0)
  * - Host: HID on PIO USB (roothub port1)
  */
 
@@ -35,20 +35,24 @@
 #endif
 
 #define CFG_TUD_HID               1
-#define CFG_TUD_CDC               0
+#define CFG_TUD_CDC               1
 #define CFG_TUD_MSC               0
 #define CFG_TUD_MIDI              0
 #define CFG_TUD_VENDOR            0
 
 #define CFG_TUD_HID_EP_BUFSIZE    8
+#define CFG_TUD_CDC_RX_BUFSIZE    256
+#define CFG_TUD_CDC_TX_BUFSIZE    256
+#define CFG_TUD_CDC_EP_BUFSIZE    64
 
 //--------------------------------------------------------------------
 // HOST CONFIGURATION
 //--------------------------------------------------------------------
 
-#define CFG_TUH_ENUMERATION_BUFSIZE 256
+// Match host_hid_to_device_cdc build that successfully enumerated the keyboard
+#define CFG_TUH_ENUMERATION_BUFSIZE 512
 
-#define CFG_TUH_HUB                 1
+#define CFG_TUH_HUB                 0
 #define CFG_TUH_DEVICE_MAX          (CFG_TUH_HUB ? 4 : 1)
 
 #define CFG_TUH_HID                  4

@@ -41,6 +41,31 @@
 #include "pio_usb.h"
 #include "tusb.h"
 
+// pio_usb_ll.h: extern only (root port array); avoid pulling PIO SM internals
+extern root_port_t pio_usb_root_port[PIO_USB_ROOT_PORT_CNT];
+#ifndef PIO_USB_ROOT_PORT
+#define PIO_USB_ROOT_PORT(_idx) (pio_usb_root_port + (_idx))
+#endif
+
+// E4: try 240 MHz (PIO USB examples allow 120 or 240 MHz only — not 125).
+// #define USE_SYS_CLK_240MHZ 1
+
+// PIO USB root interrupt bits (pio_usb_ll.h)
+#define HOST_INT_CONNECT      (1u << 0)
+#define HOST_INT_DISCONNECT   (1u << 1)
+#define HOST_INT_RESET_END    (1u << 2)
+#define HOST_INT_SETUP_REQ    (1u << 3)
+#define HOST_INT_SOF          (1u << 4)
+#define HOST_INT_EP_COMPLETE  (1u << 5)
+#define HOST_INT_EP_ERROR     (1u << 6)
+#define HOST_INT_EP_STALLED   (1u << 7)
+#define HOST_INT_EP_CONTINUE  (1u << 8)
+
+#define ENUM_TIMEOUT_MS 3000
+
+static volatile uint8_t host_mount_count;
+static volatile uint8_t host_hid_mount_count;
+
 //--------------------------------------------------------------------+
 // MACRO CONSTANT TYPEDEF PROTYPES
 //--------------------------------------------------------------------+
@@ -65,6 +90,163 @@ const uint8_t colemak[128] = {
 
 static uint8_t const keycode2ascii[128][2] =  { HID_KEYCODE_TO_ASCII };
 
+// Debug: GPIO switches GP6-GP9 (active low to GND, internal pull-up)
+#define SW_PIN_BASE 6
+#define SW_COUNT    4
+static const char *sw_names[SW_COUNT] = { "SW6", "SW7", "SW8", "SW9" };
+static bool sw_state[SW_COUNT];
+static absolute_time_t sw_debounce_at[SW_COUNT];
+
+static void switches_init(void) {
+  for (int i = 0; i < SW_COUNT; i++) {
+    uint pin = SW_PIN_BASE + i;
+    gpio_init(pin);
+    gpio_set_dir(pin, GPIO_IN);
+    gpio_pull_up(pin);
+    sw_state[i] = true; // pull-up = not pressed
+    sw_debounce_at[i] = get_absolute_time();
+  }
+}
+
+static void poll_switches(void) {
+  for (int i = 0; i < SW_COUNT; i++) {
+    uint pin = SW_PIN_BASE + i;
+    bool raw = gpio_get(pin); // true = released (pull-up)
+    if (raw == sw_state[i]) continue;
+    if (absolute_time_diff_us(sw_debounce_at[i], get_absolute_time()) < 10000) continue;
+    sw_debounce_at[i] = get_absolute_time();
+    sw_state[i] = raw;
+    if (tud_cdc_connected()) {
+      char buf[32];
+      int n = sprintf(buf, "%s %s\r\n", sw_names[i], raw ? "up" : "down");
+      tud_cdc_write(buf, n);
+      tud_cdc_write_flush();
+    }
+  }
+}
+
+// Line state after PIO invert override: raw gpio 1 -> bit 0
+static const char *line_state_str(uint8_t s) {
+  switch (s) {
+    case 0b00: return "SE0";
+    case 0b01: return "FS_IDLE";
+    case 0b10: return "LS_IDLE";
+    default:   return "SE1";
+  }
+}
+
+// Poll PIO USB host root port (roothub port1 = index 0 for PIO)
+// Print on structural status change only (not per-line flaps during traffic)
+static void poll_host_port(bool force) {
+  static bool first = true;
+  static uint32_t last_bits = 0xFFFFFFFF;
+
+  root_port_t *root = PIO_USB_ROOT_PORT(0);
+
+  // Match pio_usb_bus_get_line_state(): DP/DM are inverted at GPIO input
+  uint8_t dp = gpio_get(root->pin_dp) ? 0 : 1;
+  uint8_t dm = gpio_get(root->pin_dm) ? 0 : 1;
+  uint8_t line = (uint8_t)((dm << 1) | dp);
+
+  // Structural only: init/conn/fs/susp/mode — ignore line flaps during SOF/reset
+  uint32_t bits = ((uint32_t)root->initialized << 0) |
+                  ((uint32_t)root->connected   << 1) |
+                  ((uint32_t)root->is_fullspeed<< 2) |
+                  ((uint32_t)root->suspended   << 3) |
+                  ((uint32_t)root->mode        << 5);
+
+  if (!force && !first && bits == last_bits) return;
+  first = false;
+  last_bits = bits;
+
+  if (!tud_cdc_connected()) return;
+
+  char buf[128];
+  int n = sprintf(buf,
+      "host: init=%u conn=%u fs=%u susp=%u mode=%u dp=%u dm=%u line=%s\r\n",
+      (unsigned)root->initialized,
+      (unsigned)root->connected,
+      (unsigned)root->is_fullspeed,
+      (unsigned)root->suspended,
+      (unsigned)root->mode,
+      (unsigned)gpio_get(root->pin_dp),
+      (unsigned)gpio_get(root->pin_dm),
+      line_state_str(line));
+  tud_cdc_write(buf, n);
+  tud_cdc_write_flush();
+}
+
+// E3: print PIO host IRQ bits when they fire (race with host core; best-effort)
+static void poll_host_ints(void) {
+  static uint32_t last_ints;
+  root_port_t *root = PIO_USB_ROOT_PORT(0);
+  uint32_t ints = root->ints;
+  if (ints == last_ints) return;
+  last_ints = ints;
+  if (!tud_cdc_connected() || ints == 0) return;
+
+  char buf[128];
+  int n = sprintf(buf, "host ints: 0x%03x%s%s%s%s%s%s%s%s%s\r\n", (unsigned)ints,
+      (ints & HOST_INT_CONNECT)     ? " CONNECT" : "",
+      (ints & HOST_INT_DISCONNECT)  ? " DISCONNECT" : "",
+      (ints & HOST_INT_RESET_END)   ? " RESET_END" : "",
+      (ints & HOST_INT_SETUP_REQ)   ? " SETUP_REQ" : "",
+      (ints & HOST_INT_SOF)         ? " SOF" : "",
+      (ints & HOST_INT_EP_COMPLETE) ? " EP_OK" : "",
+      (ints & HOST_INT_EP_ERROR)    ? " EP_ERR" : "",
+      (ints & HOST_INT_EP_STALLED)  ? " EP_STALL" : "",
+      (ints & HOST_INT_EP_CONTINUE) ? " EP_CONT" : "");
+  tud_cdc_write(buf, n);
+  tud_cdc_write_flush();
+}
+
+// E1+E2: if connected but TinyUSB never mounts, force PIO re-detect so
+// CONNECT irq fires again and TinyUSB starts a fresh enumeration.
+// Do NOT call pio_usb_host_restart() here — it busy-waits on a flag that
+// is never cleared and hangs core0.
+static void poll_enum_timeout(void) {
+  static absolute_time_t conn_since;
+  static bool conn_tracking;
+  static uint8_t restart_count;
+  static uint8_t last_fail_count;
+
+  root_port_t *root = PIO_USB_ROOT_PORT(0);
+
+  if (!root->connected) {
+    conn_tracking = false;
+    return;
+  }
+
+  if (!conn_tracking) {
+    conn_tracking = true;
+    conn_since = get_absolute_time();
+    return;
+  }
+
+  if (host_mount_count > 0 || host_hid_mount_count > 0) return;
+
+  int64_t ms = absolute_time_diff_us(conn_since, get_absolute_time()) / 1000;
+  if (ms < ENUM_TIMEOUT_MS) return;
+
+  restart_count++;
+  char buf[160];
+  int n = sprintf(buf,
+      "ENUM FAIL #%u conn=%lldms mounts=%u hid=%u — force re-attach\r\n",
+      (unsigned)restart_count, (long long)ms,
+      (unsigned)host_mount_count, (unsigned)host_hid_mount_count);
+  tud_cdc_write(buf, n);
+  tud_cdc_write_flush();
+
+  // Clear connected so next SOF frame re-sees idle line and raises CONNECT.
+  // TinyUSB then gets HCD_EVENT_DEVICE_ATTACH and retries enumeration.
+  root->connected = false;
+  root->suspended = true;
+
+  last_fail_count = restart_count;
+  (void)last_fail_count;
+  conn_tracking = false; // wait for re-detect, start a new timeout window
+}
+
 /*------------- MAIN -------------*/
 
 // core1: handle host events
@@ -87,8 +269,12 @@ void core1_main() {
 
 // core0: handle device events
 int main(void) {
-  // default 125MHz is not appropreate. Sysclock should be multiple of 12MHz.
+  // PIO USB requires sysclock 120 or 240 MHz (examples reject others).
+#ifdef USE_SYS_CLK_240MHZ
+  set_sys_clock_khz(240000, true);
+#else
   set_sys_clock_khz(120000, true);
+#endif
 
   sleep_ms(10);
 
@@ -99,9 +285,45 @@ int main(void) {
   // init device stack on native usb (roothub port0)
   tud_init(0);
 
+  switches_init();
+
+  // May be lost if Mac opens CDC later; connected/alive prints cover that
+#ifdef USE_SYS_CLK_240MHZ
+  printf("boot host_hid_to_device_cdc clk=240MHz\r\n");
+#else
+  printf("boot host_hid_to_device_cdc clk=120MHz\r\n");
+#endif
+
+  bool was_cdc_connected = false;
+  absolute_time_t next_alive = get_absolute_time();
+
   while (true) {
     tud_task(); // tinyusb device task
     tud_cdc_write_flush();
+
+    poll_switches();
+    poll_host_port(false);
+    poll_host_ints();
+    poll_enum_timeout();
+
+    bool cdc_connected = tud_cdc_connected();
+    if (cdc_connected && !was_cdc_connected) {
+      tud_cdc_write_str("cdc connected\r\n");
+      tud_cdc_write_flush();
+      poll_host_port(true); // initial host status once CDC is up
+      next_alive = delayed_by_ms(get_absolute_time(), 2000);
+    }
+    was_cdc_connected = cdc_connected;
+
+    if (cdc_connected && absolute_time_diff_us(get_absolute_time(), next_alive) <= 0) {
+      char abuf[80];
+      int an = sprintf(abuf, "alive mounts=%u hid=%u\r\n",
+                       (unsigned)host_mount_count, (unsigned)host_hid_mount_count);
+      tud_cdc_write(abuf, an);
+      tud_cdc_write_flush();
+      poll_host_port(true); // re-assert host line every alive tick
+      next_alive = delayed_by_ms(get_absolute_time(), 2000);
+    }
   }
 
   return 0;
@@ -127,6 +349,29 @@ void tud_cdc_rx_cb(uint8_t itf)
 // Host HID
 //--------------------------------------------------------------------+
 
+// Invoked when a device is mounted (configured) - enumeration finished
+void tuh_mount_cb(uint8_t daddr)
+{
+  host_mount_count++;
+
+  uint16_t vid = 0, pid = 0;
+  tuh_vid_pid_get(daddr, &vid, &pid);
+
+  char tempbuf[80];
+  int count = sprintf(tempbuf, "USBH mount addr=%u [%04x:%04x]\r\n", daddr, vid, pid);
+  tud_cdc_write(tempbuf, count);
+  tud_cdc_write_flush();
+}
+
+// Invoked when a device is unmounted (detached)
+void tuh_umount_cb(uint8_t daddr)
+{
+  char tempbuf[48];
+  int count = sprintf(tempbuf, "USBH umount addr=%u\r\n", daddr);
+  tud_cdc_write(tempbuf, count);
+  tud_cdc_write_flush();
+}
+
 // Invoked when device with hid interface is mounted
 // Report descriptor is also available for use. tuh_hid_parse_report_descriptor()
 // can be used to parse common/simple enough descriptor.
@@ -136,6 +381,8 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const* desc_re
 {
   (void)desc_report;
   (void)desc_len;
+
+  host_hid_mount_count++;
 
   // Interface protocol (hid_interface_protocol_enum_t)
   const char* protocol_str[] = { "None", "Keyboard", "Mouse" };
@@ -214,6 +461,14 @@ static void process_kbd_report(uint8_t dev_addr, hid_keyboard_report_t const *re
         {
           if (ch == '\n') tud_cdc_write("\r", 1);
           tud_cdc_write(&ch, 1);
+          flush = true;
+        }
+        else
+        {
+          // non-printable (arrows, F-keys, etc.)
+          char kbuf[32];
+          int kn = sprintf(kbuf, "[key 0x%02x]\r\n", keycode);
+          tud_cdc_write(kbuf, kn);
           flush = true;
         }
       }

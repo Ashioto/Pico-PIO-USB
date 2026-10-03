@@ -84,9 +84,10 @@
 //--------------------------------------------------------------------
 
 // Size of buffer to hold descriptors and other data used for enumeration
-#define CFG_TUH_ENUMERATION_BUFSIZE 256
+#define CFG_TUH_ENUMERATION_BUFSIZE 512
 
-#define CFG_TUH_HUB                 1
+// Root-port keyboard does not need an external hub; disable to simplify enum
+#define CFG_TUH_HUB                 0
 // max device support (excluding hub device)
 #define CFG_TUH_DEVICE_MAX          (CFG_TUH_HUB ? 4 : 1) // hub typically has 4 ports
 
