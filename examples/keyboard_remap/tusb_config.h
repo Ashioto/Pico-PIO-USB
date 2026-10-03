@@ -1,6 +1,7 @@
 /*
- * TinyUSB config for keyboard_remap (debug composite):
- * - Device: HID keyboard + CDC debug on native USB (roothub port0)
+ * TinyUSB config for keyboard_remap:
+ * - Device: HID keyboard on native USB (roothub port0)
+ *           Optional CDC debug serial (KEYBOARD_REMAP_WITH_CDC=1)
  * - Host: HID on PIO USB (roothub port1)
  */
 
@@ -9,6 +10,11 @@
 
 #ifdef __cplusplus
  extern "C" {
+#endif
+
+// Set by CMake: 0 = HID-only (restricted PCs), 1 = CDC+HID debug
+#ifndef KEYBOARD_REMAP_WITH_CDC
+#define KEYBOARD_REMAP_WITH_CDC 0
 #endif
 
 #define CFG_TUSB_OS               OPT_OS_PICO
@@ -35,15 +41,17 @@
 #endif
 
 #define CFG_TUD_HID               1
-#define CFG_TUD_CDC               1
+#define CFG_TUD_CDC               KEYBOARD_REMAP_WITH_CDC
 #define CFG_TUD_MSC               0
 #define CFG_TUD_MIDI              0
 #define CFG_TUD_VENDOR            0
 
 #define CFG_TUD_HID_EP_BUFSIZE    8
+#if CFG_TUD_CDC
 #define CFG_TUD_CDC_RX_BUFSIZE    256
 #define CFG_TUD_CDC_TX_BUFSIZE    256
 #define CFG_TUD_CDC_EP_BUFSIZE    64
+#endif
 
 //--------------------------------------------------------------------
 // HOST CONFIGURATION

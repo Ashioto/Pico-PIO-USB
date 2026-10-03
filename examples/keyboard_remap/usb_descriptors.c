@@ -1,12 +1,17 @@
 /*
- * Composite USB descriptors for keyboard_remap debug:
- * CDC debug serial + HID boot keyboard.
+ * USB device descriptors for keyboard_remap.
+ * KEYBOARD_REMAP_WITH_CDC=0: HID boot keyboard only (restricted PCs)
+ * KEYBOARD_REMAP_WITH_CDC=1: CDC debug serial + HID boot keyboard
  */
 
 #include <string.h>
 
 #include "pico/unique_id.h"
 #include "tusb.h"
+
+#ifndef KEYBOARD_REMAP_WITH_CDC
+#define KEYBOARD_REMAP_WITH_CDC 0
+#endif
 
 #define _PID_MAP(itf, n)  ( (CFG_TUD_##itf) << (n) )
 #define USB_PID           (0x4000 | _PID_MAP(CDC, 0) | _PID_MAP(MSC, 1) | _PID_MAP(HID, 2) | \
@@ -18,6 +23,7 @@
 //--------------------------------------------------------------------
 // Device Descriptor
 //--------------------------------------------------------------------
+#if KEYBOARD_REMAP_WITH_CDC
 tusb_desc_device_t const desc_device = {
     .bLength            = sizeof(tusb_desc_device_t),
     .bDescriptorType    = TUSB_DESC_DEVICE,
@@ -34,6 +40,24 @@ tusb_desc_device_t const desc_device = {
     .iSerialNumber      = 0x03,
     .bNumConfigurations = 0x01,
 };
+#else
+tusb_desc_device_t const desc_device = {
+    .bLength            = sizeof(tusb_desc_device_t),
+    .bDescriptorType    = TUSB_DESC_DEVICE,
+    .bcdUSB             = USB_BCD,
+    .bDeviceClass       = 0x00,
+    .bDeviceSubClass    = 0x00,
+    .bDeviceProtocol    = 0x00,
+    .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
+    .idVendor           = USB_VID,
+    .idProduct          = USB_PID,
+    .bcdDevice          = 0x0100,
+    .iManufacturer      = 0x01,
+    .iProduct           = 0x02,
+    .iSerialNumber      = 0x03,
+    .bNumConfigurations = 0x01,
+};
+#endif
 
 uint8_t const *tud_descriptor_device_cb(void) {
   return (uint8_t const *)&desc_device;
@@ -52,8 +76,9 @@ uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance) {
 }
 
 //--------------------------------------------------------------------
-// Configuration Descriptor: CDC + HID
+// Configuration Descriptor
 //--------------------------------------------------------------------
+#if KEYBOARD_REMAP_WITH_CDC
 enum {
   ITF_NUM_CDC_COMMS = 0,
   ITF_NUM_CDC_DATA,
@@ -75,6 +100,23 @@ uint8_t const desc_configuration[] = {
                        sizeof(desc_hid_keyboard_report), EPNUM_HID,
                        CFG_TUD_HID_EP_BUFSIZE, 10),
 };
+#else
+enum {
+  ITF_NUM_HID = 0,
+  ITF_NUM_TOTAL
+};
+
+#define EPNUM_HID         0x81
+
+#define CONFIG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN)
+
+uint8_t const desc_configuration[] = {
+    TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0x00, 100),
+    TUD_HID_DESCRIPTOR(ITF_NUM_HID, 4, HID_ITF_PROTOCOL_KEYBOARD,
+                       sizeof(desc_hid_keyboard_report), EPNUM_HID,
+                       CFG_TUD_HID_EP_BUFSIZE, 10),
+};
+#endif
 
 uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
   (void)index;
@@ -89,8 +131,12 @@ enum {
   STRID_MANUFACTURER,
   STRID_PRODUCT,
   STRID_SERIAL,
+#if KEYBOARD_REMAP_WITH_CDC
   STRID_CDC,
   STRID_HID,
+#else
+  STRID_HID = 4,
+#endif
 };
 
 static uint16_t _desc_str[32 + 1];
@@ -113,7 +159,11 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
       break;
 
     case STRID_PRODUCT:
+#if KEYBOARD_REMAP_WITH_CDC
       str = "Pico Cap Fn Debug";
+#else
+      str = "Pico Cap Fn";
+#endif
       break;
 
     case STRID_SERIAL:
@@ -121,9 +171,11 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
       str = serial;
       break;
 
+#if KEYBOARD_REMAP_WITH_CDC
     case STRID_CDC:
       str = "Debug CDC";
       break;
+#endif
 
     case STRID_HID:
       str = "Cap Fn Keyboard";

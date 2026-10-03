@@ -1,11 +1,12 @@
 /*
- * Caps-as-fn keyboard remapper + GPIO arrow switches + CDC debug.
+ * Caps-as-fn keyboard remapper + GPIO arrow switches.
  *
  * Physical USB keyboard -> Pico PIO USB host (GP0/GP1)
  * GPIO switches GP6-GP9 (to GND) -> arrow keys
- * Pico native USB composite -> computer:
- *   - HID keyboard (remapped keys)
- *   - CDC serial (debug logs)
+ * Pico native USB -> computer as HID keyboard (remapped keys)
+ *
+ * KEYBOARD_REMAP_WITH_CDC=0 (default): HID only — safe for restricted PCs
+ * KEYBOARD_REMAP_WITH_CDC=1: composite HID + CDC debug serial
  *
  * Caps alone: nothing
  * Caps+Space: CapsLock
@@ -14,9 +15,11 @@
  * GP6/GP7/GP8/GP9: Left/Down/Up/Right (always active)
  * Other keys: pass through
  * Switches + Caps layer merge into one HID report.
- *
- * Debug: LED SET_REPORT disabled; CDC logs only from core0.
  */
+
+#ifndef KEYBOARD_REMAP_WITH_CDC
+#define KEYBOARD_REMAP_WITH_CDC 0
+#endif
 
 #define DEBUG_DISABLE_LED_FORWARD 1
 
@@ -158,7 +161,8 @@ static volatile uint8_t sw_dirty;
 static uint8_t prev_phys[6];
 static uint8_t prev_mapped[6];
 
-// CDC helpers — call from core0 only
+// CDC helpers — call from core0 only (no-ops when CDC disabled)
+#if KEYBOARD_REMAP_WITH_CDC
 static void cdc_log(const char *s) {
   if (tud_cdc_connected()) {
     tud_cdc_write_str(s);
@@ -179,7 +183,12 @@ static void cdc_logf(const char *fmt, ...) {
     tud_cdc_write_flush();
   }
 }
+#else
+#define cdc_log(s)         ((void)0)
+#define cdc_logf(...)      ((void)0)
+#endif
 
+#if KEYBOARD_REMAP_WITH_CDC
 static const char *line_state_str(uint8_t s) {
   switch (s) {
     case 0b00: return "SE0";
@@ -188,6 +197,7 @@ static const char *line_state_str(uint8_t s) {
     default:   return "SE1";
   }
 }
+#endif
 
 static void poll_host_port(bool force) {
   static bool first = true;
@@ -196,7 +206,12 @@ static void poll_host_port(bool force) {
   root_port_t *root = PIO_USB_ROOT_PORT(0);
   uint8_t dp = gpio_get(root->pin_dp) ? 0 : 1;
   uint8_t dm = gpio_get(root->pin_dm) ? 0 : 1;
+#if KEYBOARD_REMAP_WITH_CDC
   uint8_t line = (uint8_t)((dm << 1) | dp);
+#else
+  (void)dp;
+  (void)dm;
+#endif
 
   uint32_t bits = ((uint32_t)root->initialized << 0) |
                   ((uint32_t)root->connected   << 1) |
@@ -208,6 +223,7 @@ static void poll_host_port(bool force) {
   first = false;
   last_bits = bits;
 
+#if KEYBOARD_REMAP_WITH_CDC
   cdc_logf("host: init=%u conn=%u fs=%u susp=%u mode=%u dp=%u dm=%u line=%s\r\n",
            (unsigned)root->initialized,
            (unsigned)root->connected,
@@ -217,6 +233,7 @@ static void poll_host_port(bool force) {
            (unsigned)gpio_get(root->pin_dp),
            (unsigned)gpio_get(root->pin_dm),
            line_state_str(line));
+#endif
 }
 
 static void poll_host_ints(void) {
@@ -464,7 +481,7 @@ void core1_main(void) {
   }
 }
 
-// core0: native USB composite — HID + CDC
+// core0: native USB — HID (and CDC if enabled)
 int main(void) {
   // PIO USB requires sysclock 120 or 240 MHz (examples reject others).
 #ifdef USE_SYS_CLK_240MHZ
@@ -485,10 +502,15 @@ int main(void) {
   bool was_cdc_connected = false;
   absolute_time_t next_alive = get_absolute_time();
 
+#if KEYBOARD_REMAP_WITH_CDC
 #ifdef USE_SYS_CLK_240MHZ
   cdc_log("boot keyboard_remap debug clk=240MHz\r\n");
 #else
   cdc_log("boot keyboard_remap debug clk=120MHz\r\n");
+#endif
+#else
+  (void)was_cdc_connected;
+  (void)next_alive;
 #endif
 
   while (true) {
@@ -526,6 +548,7 @@ int main(void) {
       }
     }
 
+#if KEYBOARD_REMAP_WITH_CDC
     bool cdc_connected = tud_cdc_connected();
     if (cdc_connected && !was_cdc_connected) {
       cdc_log("cdc connected\r\n");
@@ -548,6 +571,7 @@ int main(void) {
       poll_host_port(true);
       next_alive = delayed_by_ms(get_absolute_time(), 2000);
     }
+#endif
   }
 
   return 0;
@@ -665,8 +689,10 @@ void tud_hid_report_complete_cb(uint8_t instance, uint8_t const *report,
   (void)len;
 }
 
+#if KEYBOARD_REMAP_WITH_CDC
 void tud_cdc_rx_cb(uint8_t itf) {
   (void)itf;
   char buf[64];
   (void)tud_cdc_read(buf, sizeof(buf));
 }
+#endif
