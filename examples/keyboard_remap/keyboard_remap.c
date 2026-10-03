@@ -48,6 +48,10 @@ extern root_port_t pio_usb_root_port[PIO_USB_ROOT_PORT_CNT];
 #define HOST_INT_EP_CONTINUE  (1u << 8)
 #define HOST_INT_EP_ANY       (HOST_INT_EP_COMPLETE | HOST_INT_EP_ERROR | HOST_INT_EP_STALLED)
 
+// PIO USB examples allow 120 or 240 MHz only — not 125.
+// 240 MHz = more PIO cycles per USB bit (timing margin if 120 is marginal).
+#define USE_SYS_CLK_240MHZ 1
+
 // Match host_hid_to_device_cdc: force re-attach every 3s when no mount.
 // Do NOT call pio_usb_host_restart() — it busy-waits forever and hangs.
 #define HOST_ENUM_TIMEOUT_MS 3000
@@ -421,7 +425,12 @@ void core1_main(void) {
 
 // core0: native USB composite — HID + CDC
 int main(void) {
+  // PIO USB requires sysclock 120 or 240 MHz (examples reject others).
+#ifdef USE_SYS_CLK_240MHZ
+  set_sys_clock_khz(240000, true);
+#else
   set_sys_clock_khz(120000, true);
+#endif
 
   sleep_ms(10);
 
@@ -435,7 +444,11 @@ int main(void) {
   bool was_cdc_connected = false;
   absolute_time_t next_alive = get_absolute_time();
 
-  cdc_log("boot keyboard_remap debug\r\n");
+#ifdef USE_SYS_CLK_240MHZ
+  cdc_log("boot keyboard_remap debug clk=240MHz\r\n");
+#else
+  cdc_log("boot keyboard_remap debug clk=120MHz\r\n");
+#endif
 
   while (true) {
     tud_task();
